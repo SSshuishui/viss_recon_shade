@@ -204,7 +204,7 @@ int main() {
     cudaDeviceSynchronize();
 
     // 存储结果
-    save_Shade(shadeM, "shadeM.txt");
+    save_Shade(shadeM, "shade30Mperiod1.txt");
     
     return 0;
 }
