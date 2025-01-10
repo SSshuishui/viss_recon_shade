@@ -41,12 +41,11 @@ struct timeval start, finish;
 float total_time;
 
 string address = "./frequency_1M/";
-string viss_address = "./Viss_1M/";
-string F_address = "./F_recon_1M/";
+string F_address = "./F_recon_1M_accu/";
 string para;
 string duration = "frequency1M";  // 第几个周期的uvw
 string sufix = ".txt";
-const int amount = 30;  // 一共有多少个周期  15月 * 30天 / 14天/周期
+const int amount = 130;  // 一共有多少个周期  15月 * 30天 / 14天/周期
 
 // 1 M
 const int uvw_presize = 4000000;
@@ -71,58 +70,94 @@ void writeToFile(const thrust::device_vector<Complex>& device_vector, const std:
 }
 
 
+// 计算特定 q 值的索引有几个
+__global__ void computeLocCount(
+    float* NX, int* countLoc, int lmnC_index, int NX_index) 
+{
+    int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q < lmnC_index) {
+        // countLoc: (lmnC_index, 1)
+        int count = 0;
+        for (int i = 0; i < NX_index; i++) {
+            if ((NX[i]-1) == q) {
+                count++;
+            }
+        }
+        countLoc[q] = count;
+    }
+}
+
+
+// 把每个 q 值对应的索引保存下来
+__global__ void computeLocViss(
+    float* NX, int* NXq, int* countLoc, int lmnC_index, int NX_index) 
+{
+    int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q < lmnC_index) {
+        // NXq: (NX_index, 1)
+        // countLoc: (lmnC_index, 1)
+        int start_idx=0;
+        for(int i=1; i<=q; i++){
+            start_idx += countLoc[i-1];
+        }
+        for (int i = 0; i < NX_index; i++) {
+            if ((NX[i]-1) == q) {  // NX中的索引是从1开始的(因为是matlab结果导入的)
+                NXq[start_idx] = i;
+                start_idx++;
+            }
+        }
+    }
+}
+
+
 // 定义计算可见度核函数, 验证一致
 __global__ void visscal(
             int uvws_index, int lmnC_index, int res,
-            int NX_size, Complex *NX, Complex *FF, Complex *FF2,
-            Complex *viss, Complex *u, Complex *v, Complex *w,
-            Complex *l, Complex *m, Complex *n, Complex *C,
-            int *shadeM1, int *shadeM2, int *shadeM3, int *shadeM4,
-            Complex I1, Complex CPI, Complex zero, Complex one,
-            Complex two, Complex dl, Complex dm, Complex dn)
+            float* FF, Complex* viss, 
+            float* u, float* v, float* w,
+            float* l, float* m, float* n,
+            int* shadeM1, int* shadeM2, int* shadeM3, int* shadeM4,
+            int* NXq, int* countLoc,
+            Complex I1, Complex CPI, Complex zero, Complex two, 
+            float dl, float dm, float dn)
 {
     int uvws_ = blockIdx.x * blockDim.x + threadIdx.x;
     if (uvws_ < uvws_index)
     {   
         // 遮挡FF的部分
-        FF2 = FF;
+        int start_idx = 0;
         for (int lmnC_ = 0; lmnC_ < lmnC_index; ++lmnC_) {
-            for (int lo=0; lo>=shadeM3[uvws_]&&lo<=shadeM4[uvws_]; ++lo){
-                if(lmnC_>=lo*res+shadeM1[uvws_]+1 && lmnC_<lo*res+shadeM2[uvws_]){
-                    FF2[lmnC_]=240;
+            // 计算 C
+            float sumReal = 0;
+            for(int con=0; con < countLoc[lmnC_]; con++){
+                int locViss = NXq[con + start_idx];  // 从NXq中取出对应的索引, K=find(NX==q);
+                int addFF = FF[locViss]; // 初始化为FF(K)
+                // 若 K 在遮挡区域内，则FF(K) = 240
+                for (int lo=0; lo>=shadeM3[uvws_] && lo<=shadeM4[uvws_]; ++lo){
+                    if(locViss>=lo*res+shadeM1[uvws_]+1 && locViss<lo*res+shadeM2[uvws_]){
+                        addFF = 240;
+                    }
                 }
+                sumReal += addFF;
             }
-        }
-        // 计算C
-        for (int lmnC_ = 0; lmnC_ < lmnC_index; ++lmnC_) {
-            float sumReal = 0.0;
-            int count=0;
-            for (int i=0; i < NX_size; ++i) {
-                if (NX[i].real() == lmnC_) {
-                    sumReal += FF[i].real();
-                    count++;
-                }
-            }
-            if (count > 0) {
-                C[lmnC_-1] = Complex(sumReal/count, 0);
-            }
-        }
-        viss[uvws_] = zero;
-        for (int lmnC_ = 0; lmnC_ < lmnC_index; ++lmnC_) {
-            viss[uvws_] = viss[uvws_] + C[lmnC_] * complexExp((zero - I1) * two * CPI * (u[uvws_]*l[lmnC_]/dl + v[uvws_]*m[lmnC_]/dm + w[uvws_]*(n[lmnC_]-one)/dn));
+            start_idx += countLoc[lmnC_];
+            float C_tmp = sumReal / countLoc[lmnC_];  // mean(FF(K));
+        
+            Complex vari(u[uvws_]*l[lmnC_]/dl + v[uvws_]*m[lmnC_]/dm + w[uvws_]*(n[lmnC_]-1)/dn, 0.0f);
+            viss[uvws_] = viss[uvws_] + Complex(C_tmp, 0) * complexExp((zero - I1) * two * CPI * vari);
         } 
-        viss[uvws_] *= complexExp((zero-I1) * two * CPI * w[uvws_]/dn);
+        viss[uvws_] *= complexExp((zero-I1) * two * CPI * Complex(w[uvws_]/dn, 0));
     }
 }
 
 
 // 定义图像反演核函数  验证正确
 __global__  void imagerecon(int uvw_index, int lmnC_index, int res,
-            Complex *F, Complex *viss, Complex *u, Complex *v, Complex *w,
-            Complex *l, Complex *m, Complex *n, Complex *C, Complex *uvwFrequencyMap,
+            Complex* F, Complex *viss, float* u, float* v, float* w,
+            float* l, float* m, float* n, float* uvwFrequencyMap,
             float *thetaP0, float *phiP0, float *dtheta, float *dphi,
-            Complex I1, Complex CPI, Complex zero, Complex one,
-            Complex two, Complex dl, Complex dm, Complex dn)
+            Complex I1, Complex CPI, Complex zero, Complex two, 
+            float dl, float dm, float dn)
 {
     Complex amount((float)uvw_index, 0.0);
     
@@ -130,14 +165,14 @@ __global__  void imagerecon(int uvw_index, int lmnC_index, int res,
     if (lmnC_ < lmnC_index){  
         float phiP = floorf(lmnC_ / res);
         float thetaP = lmnC_ - phiP * res;
-        F[lmnC_] = zero;
+        Complex temp;
         for(int uvw_=0; uvw_<uvw_index; ++uvw_)
         {   
-            Complex temp;
             if(fabs(thetaP0[uvw_]-thetaP)<dtheta[uvw_] && fabs(phiP0[uvw_]-phiP)<dphi[uvw_]){
-                temp = 0;
+                temp = zero;
             }else{
-                temp = uvwFrequencyMap[uvw_] * viss[uvw_] * complexExp(I1 * two * CPI * (u[uvw_]*l[lmnC_]/dl + v[uvw_]*m[lmnC_]/dm + w[uvw_]*n[lmnC_]/dn));
+                Complex vari(u[uvw_]*l[lmnC_]/dl + v[uvw_]*m[lmnC_]/dm + w[uvw_]*n[lmnC_]/dn, 0.0f);
+                temp = uvwFrequencyMap[uvw_] * viss[uvw_] * complexExp(I1 * two * CPI * vari);
             }
             F[lmnC_] = F[lmnC_] + temp;
         }
@@ -149,13 +184,13 @@ __global__  void imagerecon(int uvw_index, int lmnC_index, int res,
 
 int vissGen(int id, int totalnode, int RES) 
 {   
+    cout << "periods: " << amount << endl;
     Complex res(RES, 0.0);
     Complex I1(0.0, 1.0);
-    Complex dl((float) 2 * RES / (RES - 1), 0.0);
-    Complex dm((float) 2 * RES / (RES - 1), 0.0);
-    Complex dn((float) 2 * RES / (RES - 1), 0.0);
+    float dl = 2 * RES / (RES - 1);
+    float dm = 2 * RES / (RES - 1);
+    float dn = 2 * RES / (RES - 1);
     Complex zero(0.0, 0.0);
-    Complex one(1.0, 0.0);
     Complex two(2.0, 0.0);
     Complex CPI(M_PI, 0.0);
 
@@ -211,8 +246,8 @@ int vissGen(int id, int totalnode, int RES)
     cout << "lmnC index: " << lmnC_index << endl;
     cout << "NX index: " << NX_index << endl;
 
-    std::vector<Complex> cl(lmnC_index), cm(lmnC_index), cn(lmnC_index), cc(lmnC_index);
-    std::vector<Complex> cNX(NX_index), cFF(NX_index);
+    std::vector<float> cl(lmnC_index), cm(lmnC_index), cn(lmnC_index), cc(lmnC_index);
+    std::vector<float> cNX(NX_index), cFF(NX_index);
     for (int i = 0; i < lmnC_index && lFile.good() && mFile.good() && nFile.good() && cFile.good(); ++i) {
         lFile >> cl[i];
         mFile >> cm[i];
@@ -281,36 +316,35 @@ int vissGen(int id, int totalnode, int RES)
         cudaSetDevice(tid);
         std::cout << "Thread " << tid << " is running on device " << tid << std::endl;
 
-        // 将 l m n C NX 数据从cpu搬到GPU上        
-        thrust::device_vector<Complex> l(cl.begin(), cl.end());
-        thrust::device_vector<Complex> m(cm.begin(), cm.end());
-        thrust::device_vector<Complex> n(cn.begin(), cn.end());
-        thrust::device_vector<Complex> C(cc.begin(), cc.end());
-
-        thrust::device_vector<Complex> dNX = cNX;
-        thrust::device_vector<Complex> dFF = cFF;
-        thrust::device_vector<Complex> dFF2(NX_index);
-
-        // 创建用来存储不同index中【u, v, w】
-        std::vector<Complex> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
-        thrust::device_vector<Complex> u(uvw_presize), v(uvw_presize), w(uvw_presize);
-
-        // 常见用来存储shadeM的 4个 变量
-        std::vector<int> M1(uvw_presize), M2(uvw_presize), M3(uvw_presize), M4(uvw_presize);
-        thrust::device_vector<int> shadeMat1(uvw_presize), shadeMat2(uvw_presize), shadeMat3(uvw_presize), shadeMat4(uvw_presize);
-
-        // 创建存储uvw坐标对应的频次
-        std::vector<Complex> uvwMapVector(uvw_presize);
-        thrust::device_vector<Complex> uvwFrequencyMap(uvw_presize);
-       
-        // 存储计算后的到的最终结果
-        thrust::device_vector<Complex> F(lmnC_index);
-
         // 遍历所有开启的线程处理， 一个线程控制一个GPU 处理一个id*amount/total的块
         for (int p = tid + id*amount/totalnode; p < (id + 1) * amount / totalnode; p += nDevices) 
-        // for (int p = tid + 96; p < (id + 1) * amount / totalnode; p += nDevices) 
         {
             cout << "for loop: " << p+1 << endl;
+
+            // 将 l m n C NX 数据从cpu搬到GPU上        
+            thrust::device_vector<float> l(cl.begin(), cl.end());
+            thrust::device_vector<float> m(cm.begin(), cm.end());
+            thrust::device_vector<float> n(cn.begin(), cn.end());
+            thrust::device_vector<float> C(cc.begin(), cc.end());
+
+            thrust::device_vector<float> dNX = cNX;
+            thrust::device_vector<float> dFF = cFF;
+            thrust::device_vector<float> dFF2(NX_index);
+
+            // 创建用来存储不同index中【u, v, w】
+            std::vector<float> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
+            thrust::device_vector<float> u(uvw_presize), v(uvw_presize), w(uvw_presize);
+
+            // 常见用来存储shadeM的 4个 变量
+            std::vector<int> M1(uvw_presize), M2(uvw_presize), M3(uvw_presize), M4(uvw_presize);
+            thrust::device_vector<int> shadeMat1(uvw_presize), shadeMat2(uvw_presize), shadeMat3(uvw_presize), shadeMat4(uvw_presize);
+
+            // 创建存储uvw坐标对应的频次
+            std::vector<float> uvwMapVector(uvw_presize);
+            thrust::device_vector<float> uvwFrequencyMap(uvw_presize);
+        
+            // 存储计算后的到的最终结果
+            thrust::device_vector<Complex> F(lmnC_index);
 
             // 计时统计
             cudaEvent_t start, stop;
@@ -348,19 +382,18 @@ int vissGen(int id, int totalnode, int RES)
                         // 简化查找操作
                         auto it = cUVWFrequencyMap.find(key_point);
                         if (it != cUVWFrequencyMap.end()) {
-                            uvwMapVector[uvw_index] = Complex(1 / (it->second), 0);  // 存储频次的倒数
+                            uvwMapVector[uvw_index] = 1 / (it->second);  // 存储频次的倒数
                         } else {
-                            uvwMapVector[uvw_index] = Complex(1, 0); 
+                            uvwMapVector[uvw_index] = 1; 
                         }
                         // cu, cv, cw 需要存储原始坐标
-                        cu[uvw_index] = Complex(u_point, 0);
-                        cv[uvw_index] = Complex(v_point, 0);
-                        cw[uvw_index] = Complex(w_point, 0);
+                        cu[uvw_index] = u_point;
+                        cv[uvw_index] = v_point;
+                        cw[uvw_index] = w_point;
                         uvw_index++;
                     }
                 }               
                 cout << "load uvw with uvw_index: " << uvw_index << endl; 
-                
                 // 复制到GPU上
                 thrust::copy(cu.begin(), cu.begin() + uvw_index, u.begin());
                 thrust::copy(cv.begin(), cv.begin() + uvw_index, v.begin());
@@ -370,7 +403,6 @@ int vissGen(int id, int totalnode, int RES)
                 // 读取shadeM
                 string address_shadeM = address + "shadeM" + to_string(p+1) + duration + sufix;
                 cout << "address_shadeM: " << address_shadeM << std::endl;
-
                 ifstream shadeMFile(address_shadeM);
                 shade_index = 0;
                 if (shadeMFile.is_open()) {
@@ -400,7 +432,6 @@ int vissGen(int id, int totalnode, int RES)
                 }else{
                     cout << "load right! uvw shape is equal to shadeM shape" << endl;
                 }
-                
                 // 复制到GPU上
                 thrust::copy(M1.begin(), M1.begin() + shade_index, shadeMat1.begin());
                 thrust::copy(M2.begin(), M2.begin() + shade_index, shadeMat2.begin());
@@ -426,21 +457,43 @@ int vissGen(int id, int totalnode, int RES)
             cudaEventCreate(&vissstop);
             cudaEventRecord(vissstart);
 
-            // 存储计算后的可见度
-            thrust::device_vector<Complex> viss(uvw_index);
             int blockSize;
             int minGridSize; // 最小网格大小
+
+            // 先提前计算每个 q 值的索引有几个
+            thrust::device_vector<int> countLoc(lmnC_index);
+            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocCount, 0, 0);
+            int gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            computeLocCount<<<gridSize, blockSize>>>(
+                thrust::raw_pointer_cast(dNX.data()), 
+                thrust::raw_pointer_cast(countLoc.data()), 
+                lmnC_index, NX_index);
+            CHECK(cudaDeviceSynchronize());
+
+            // 然后存下来每个 q 值对应的索引
+            thrust::device_vector<int> NXq(dNX.size());
+            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
+            gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            cout << "Compute LocViss, girdSize: " << gridSize << endl;
+            cout << "Compute LocViss, blockSize: " << blockSize << endl;
+            printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
+            computeLocViss<<<gridSize, blockSize>>>(
+                thrust::raw_pointer_cast(dNX.data()), 
+                thrust::raw_pointer_cast(NXq.data()), 
+                thrust::raw_pointer_cast(countLoc.data()), 
+                lmnC_index, NX_index);
+            CHECK(cudaDeviceSynchronize());
+
+            // 存储计算后的可见度
+            thrust::device_vector<Complex> viss(uvw_index);
             cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, visscal, 0, 0);
-            int gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
+            gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
             cout << "Viss Computing, blockSize: " << blockSize << endl;
             cout << "Viss Computing, girdSize: " << gridSize << endl;
             printf("Viss Computing... Here is gpu %d running process %d on node %d\n", omp_get_thread_num(), p+1, id);
             // 调用函数计算可见度
-
-            visscal<<<gridSize, blockSize>>>(uvw_index, lmnC_index, RES, NX_index,
-                    thrust::raw_pointer_cast(dNX.data()),
+            visscal<<<gridSize, blockSize>>>(uvw_index, lmnC_index, RES,
                     thrust::raw_pointer_cast(dFF.data()),
-                    thrust::raw_pointer_cast(dFF2.data()),
                     thrust::raw_pointer_cast(viss.data()),
                     thrust::raw_pointer_cast(u.data()),
                     thrust::raw_pointer_cast(v.data()),
@@ -448,12 +501,13 @@ int vissGen(int id, int totalnode, int RES)
                     thrust::raw_pointer_cast(l.data()),
                     thrust::raw_pointer_cast(m.data()),
                     thrust::raw_pointer_cast(n.data()),
-                    thrust::raw_pointer_cast(C.data()),
                     thrust::raw_pointer_cast(shadeMat1.data()),
                     thrust::raw_pointer_cast(shadeMat2.data()), 
                     thrust::raw_pointer_cast(shadeMat3.data()), 
                     thrust::raw_pointer_cast(shadeMat4.data()),
-                    I1, CPI, zero, one, two, dl, dm, dn);
+                    thrust::raw_pointer_cast(NXq.data()),
+                    thrust::raw_pointer_cast(countLoc.data()),
+                    I1, CPI, zero, two, dl, dm, dn);
             // 进行线程同步
             CHECK(cudaDeviceSynchronize());
             cout << "period " << p+1 << " viss compute success!" << endl;
@@ -485,7 +539,6 @@ int vissGen(int id, int totalnode, int RES)
             thrust::transform(shadeMat1.begin(), shadeMat1.end(), shadeMat2.begin(), dtheta.begin(), thrust::divides<float>());
             thrust::transform(shadeMat3.begin(), shadeMat3.end(), shadeMat4.begin(), dphi.begin(), thrust::divides<float>());
             
-
             cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, imagerecon, 0, 0);
             gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
             cout << "Image Reconstruction, blockSize: " << blockSize << endl;
@@ -502,13 +555,12 @@ int vissGen(int id, int totalnode, int RES)
                 thrust::raw_pointer_cast(l.data()),
                 thrust::raw_pointer_cast(m.data()),
                 thrust::raw_pointer_cast(n.data()),
-                thrust::raw_pointer_cast(C.data()),
                 thrust::raw_pointer_cast(uvwFrequencyMap.data()),
                 thrust::raw_pointer_cast(thetaP0.data()),
                 thrust::raw_pointer_cast(phiP0.data()),
                 thrust::raw_pointer_cast(dtheta.data()),
                 thrust::raw_pointer_cast(dphi.data()),
-                I1, CPI, zero, one, two, dl, dm, dn);
+                I1, CPI, zero, two, dl, dm, dn);
             // 进行线程同步
             CHECK(cudaDeviceSynchronize());
             cout << "Period " << p+1 << " Image Reconstruction Success!" << endl;
@@ -546,7 +598,7 @@ int vissGen(int id, int totalnode, int RES)
                     std::cerr << "Error opening file: " << address_Ex << endl;
                 }
                 for (int c = 0; c < NX_index; c++) {
-                    int tmp = static_cast<int>(cNX[c].real()) - 1;  // matlab中下标从1开始
+                    int tmp = static_cast<int>(cNX[c]) - 1;  // matlab中下标从1开始
                     extendF[c] = tempF[tmp];
                     ExFile << extendF[c].real() << std::endl;
                 }

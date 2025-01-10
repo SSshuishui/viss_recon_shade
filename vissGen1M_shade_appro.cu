@@ -41,12 +41,11 @@ struct timeval start, finish;
 float total_time;
 
 string address = "./frequency_1M/";
-string viss_address = "./Viss_1M/";
-string F_address = "./F_recon_1M/";
+string F_address = "./F_recon_1M_appro/";
 string para;
 string duration = "frequency1M";  // 第几个周期的uvw
 string sufix = ".txt";
-const int amount = 30;  // 一共有多少个周期  15月 * 30天 / 14天/周期
+const int amount = 1;  // 一共有多少个周期  15月 * 30天 / 14天/周期
 
 // 1 M
 const int uvw_presize = 4000000;
@@ -69,6 +68,7 @@ void writeToFile(const thrust::device_vector<Complex>& device_vector, const std:
     // 关闭文件
     file.close();
 }
+
 
 // 定义计算C的核函数，每一个线程处理一个q的值，q为0-nn的范围， 但是NX中保存的索引是1-nn，因此需要对齐，验证正确
 __global__ void computeC(Complex *NX, Complex *FF, Complex *C, int nn, int NX_size) {
@@ -307,32 +307,31 @@ int vissGen(int id, int totalnode, int RES)
         cudaSetDevice(tid);
         std::cout << "Thread " << tid << " is running on device " << tid << std::endl;
 
-        // 将 l m n C NX 数据从cpu搬到GPU上        
-        thrust::device_vector<Complex> l(cl.begin(), cl.end());
-        thrust::device_vector<Complex> m(cm.begin(), cm.end());
-        thrust::device_vector<Complex> n(cn.begin(), cn.end());
-        thrust::device_vector<Complex> C(C_host.begin(), C_host.end());
-
-        // 创建用来存储不同index中【u, v, w】
-        std::vector<Complex> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
-        thrust::device_vector<Complex> u(uvw_presize), v(uvw_presize), w(uvw_presize);
-
-        // 常见用来存储shadeM的 4个 变量
-        std::vector<int> M1(uvw_presize), M2(uvw_presize), M3(uvw_presize), M4(uvw_presize);
-        thrust::device_vector<int> shadeMat1(uvw_presize), shadeMat2(uvw_presize), shadeMat3(uvw_presize), shadeMat4(uvw_presize);
-
-        // 创建存储uvw坐标对应的频次
-        std::vector<Complex> uvwMapVector(uvw_presize);
-        thrust::device_vector<Complex> uvwFrequencyMap(uvw_presize);
-       
-        // 存储计算后的到的最终结果
-        thrust::device_vector<Complex> F(lmnC_index);
-
         // 遍历所有开启的线程处理， 一个线程控制一个GPU 处理一个id*amount/total的块
         for (int p = tid + id*amount/totalnode; p < (id + 1) * amount / totalnode; p += nDevices) 
-        // for (int p = tid + 96; p < (id + 1) * amount / totalnode; p += nDevices) 
         {
             cout << "for loop: " << p+1 << endl;
+
+            // 将 l m n C NX 数据从cpu搬到GPU上        
+            thrust::device_vector<Complex> l(cl.begin(), cl.end());
+            thrust::device_vector<Complex> m(cm.begin(), cm.end());
+            thrust::device_vector<Complex> n(cn.begin(), cn.end());
+            thrust::device_vector<Complex> C(C_host.begin(), C_host.end());
+
+            // 创建用来存储不同index中【u, v, w】
+            std::vector<Complex> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
+            thrust::device_vector<Complex> u(uvw_presize), v(uvw_presize), w(uvw_presize);
+
+            // 常见用来存储shadeM的 4个 变量
+            std::vector<int> M1(uvw_presize), M2(uvw_presize), M3(uvw_presize), M4(uvw_presize);
+            thrust::device_vector<int> shadeMat1(uvw_presize), shadeMat2(uvw_presize), shadeMat3(uvw_presize), shadeMat4(uvw_presize);
+
+            // 创建存储uvw坐标对应的频次
+            std::vector<Complex> uvwMapVector(uvw_presize);
+            thrust::device_vector<Complex> uvwFrequencyMap(uvw_presize);
+        
+            // 存储计算后的到的最终结果
+            thrust::device_vector<Complex> F(lmnC_index);
 
             // 计时统计
             cudaEvent_t start, stop;

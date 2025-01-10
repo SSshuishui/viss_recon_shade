@@ -28,7 +28,7 @@ string F_address = "./F_recon_1M/";
 string para;
 string duration = "frequency1M";  // 第几个周期的uvw
 string sufix = ".txt";
-const int amount = 30;
+const int amount = 130;
 
 const int uvw_presize = 4000000;
 
