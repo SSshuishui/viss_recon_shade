@@ -65,118 +65,216 @@ struct clip_functor {
 
 
 // 计算特定 q 值的索引有几个
-__global__ void computeLocCount(
-    float* NX, int* countLoc, int lmnC_index, int NX_index) 
-{
-    int q = blockIdx.x * blockDim.x + threadIdx.x;
-    if (q < lmnC_index) {
-        // countLoc: (lmnC_index, 1)
-        int count = 0;
-        for (int i = 0; i < NX_index; i++) {
-            if ((NX[i]) == q) {
-                count++;
-            }
-        }
-        countLoc[q] = count;
-    }
-}
+// __global__ void computeLocCount(
+//     const float* __restrict__ NX,      // 添加 const 和 __restrict__
+//     int* __restrict__ countLoc,
+//     const int lmnC_index,
+//     const int NX_index)
+// {
+//     const int q = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (q >= lmnC_index) return;
+
+//     // 使用局部计数器
+//     int local_count = 0;
+    
+//     // 主循环展开
+//     #pragma unroll 8
+//     for (int i = 0; i < NX_index; i++) {
+//         // 预取数据到寄存器
+//         const float nx_val = NX[i];
+//         // 使用直接比较代替条件语句
+//         local_count += (nx_val == q);
+//     }
+    
+//     // 存储最终结果
+//     countLoc[q] = local_count;
+// }
 
 
 // 把每个 q 值对应的索引保存下来
-__global__ void computeLocViss(
-    float* NX, int* NXq, int* countLoc, int lmnC_index, int NX_index) 
-{
-    int q = blockIdx.x * blockDim.x + threadIdx.x;
-    if (q < lmnC_index) {
-        // NXq: (NX_index, 1)
-        // countLoc: (lmnC_index, 1)
-        int start_idx=0;
-        for(int i=1; i<=q; i++){
-            start_idx += countLoc[i-1];
-        }
-        for (int i = 0; i < NX_index; i++) {
-            if ((NX[i]) == q) {  // NX中的索引是从1开始的(因为是matlab结果导入的)
-                NXq[start_idx] = i;
-                start_idx++;
-            }
-        }
-    }
-}
+// __global__ void computeLocViss(
+//     const float* __restrict__ NX,
+//     int* __restrict__ NXq,
+//     const int* __restrict__ countLoc,
+//     const int lmnC_index,
+//     const int NX_index)
+// {
+//     const int q = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (q >= lmnC_index) return;
+
+//     // 预计算起始索引
+//     int start_idx = 0;
+//     if (q > 0) {
+//         #pragma unroll 8
+//         for (int i = 0; i < q; i++) {
+//             start_idx += countLoc[i];
+//         }
+//     }
+//     // 使用局部索引计数器
+//     int local_idx = start_idx;
+//     // 主循环展开
+//     #pragma unroll 8
+//     for (int i = 0; i < NX_index; i++) {
+//         // 预取数据到寄存器
+//         const float nx_val = NX[i];
+//         // 使用条件赋值代替if语句
+//         bool match = (nx_val == q);
+//         if (match) {
+//             NXq[local_idx++] = i;
+//         }
+//     }
+// }
 
 
 // 定义计算可见度核函数, 验证一致
 __global__ void visscal(
-            int uvws_index, int lmnC_index, int res,
-            float* FF, Complex* viss, 
-            float* u, float* v, float* w,
-            float* l, float* m, float* n,
-            int* shadeM1, int* shadeM2, int* shadeM3, int* shadeM4,
-            int* NXq, int* countLoc,
-            Complex I1, Complex CPI, Complex zero, Complex two, 
-            float dl, float dm, float dn)
+    int uvws_index, int lmnC_index, int res,
+    const float* __restrict__ FF,           // 添加 const 和 __restrict__
+    Complex* __restrict__ viss, 
+    const float* __restrict__ u,
+    const float* __restrict__ v,
+    const float* __restrict__ w,
+    const float* __restrict__ l,
+    const float* __restrict__ m,
+    const float* __restrict__ n,
+    const int* __restrict__ shadeM1,
+    const int* __restrict__ shadeM2,
+    const int* __restrict__ shadeM3,
+    const int* __restrict__ shadeM4,
+    const float* __restrict__ NXq,
+    const int* __restrict__ countLoc,
+    const Complex I1,
+    const Complex CPI,
+    const Complex zero,
+    const Complex two, 
+    const float dl,
+    const float dm,
+    const float dn)
 {
-    int uvws_ = blockIdx.x * blockDim.x + threadIdx.x;
-    if (uvws_ < uvws_index)
-    {   
-        // 遮挡FF的部分
-        int start_idx = 0;
-        for (int lmnC_ = 0; lmnC_ < lmnC_index; ++lmnC_) {
-            // 计算 C
-            float sumReal = 0;
-            for(int con=0; con < countLoc[lmnC_]; con++){
-                int locViss = NXq[con + start_idx];  // 从NXq中取出对应的索引, K=find(NX==q);
-                int addFF = FF[locViss]; // 初始化为FF(K)
-                // 若 K 在遮挡区域内，则FF(K) = 240
-                for (int lo=0; lo>=shadeM3[uvws_] && lo<=shadeM4[uvws_]; ++lo){
-                    if(locViss>=lo*res+shadeM1[uvws_]+1 && locViss<lo*res+shadeM2[uvws_]){
-                        addFF = 240;
-                    }
+    const int uvws_ = blockIdx.x * blockDim.x + threadIdx.x;
+    if (uvws_ >= uvws_index) return;  // 改用提前返回的方式
+
+    // 预加载频繁使用的数据到寄存器
+    const float inv_dl = 1.0f / dl;
+    const float inv_dm = 1.0f / dm;
+    const float inv_dn = 1.0f / dn;
+    const float u_val = u[uvws_] * inv_dl;
+    const float v_val = v[uvws_] * inv_dm;
+    const float w_val = w[uvws_] * inv_dn;
+    // 预加载遮挡相关的数据
+    const int shade_m1 = shadeM1[uvws_];
+    const int shade_m2 = shadeM2[uvws_];
+    const int shade_m3 = shadeM3[uvws_];
+    const int shade_m4 = shadeM4[uvws_];
+
+    // 初始化累加器
+    Complex acc = zero;
+
+    int start_idx = 0;
+    // 保持原有的循环结构
+    for (int lmnC_ = 0; lmnC_ < lmnC_index; ++lmnC_) {
+        const int current_count = countLoc[lmnC_];
+        float sumReal = 0;
+
+        // 内层循环计算 sumReal
+        for (int con = 0; con < current_count; con++) {
+            const long long locViss = NXq[con + start_idx];
+            float addFF = FF[locViss];
+
+            // 优化遮挡检查
+            for (int lo = 0; lo >= shade_m3 && lo <= shade_m4; ++lo) {
+                if (locViss >= lo*res+shade_m1+1 && locViss < lo*res+shade_m2) {
+                    addFF = 240;
                 }
-                sumReal += addFF;
             }
-            start_idx += countLoc[lmnC_];
-            float C_tmp = sumReal / countLoc[lmnC_];  // mean(FF(K));
+            sumReal += addFF;
+        }
         
-            Complex vari(u[uvws_]*l[lmnC_]/dl + v[uvws_]*m[lmnC_]/dm + w[uvws_]*(n[lmnC_]-1)/dn, 0.0f);
-            viss[uvws_] = viss[uvws_] + Complex(C_tmp, 0) * complexExp((zero - I1) * two * CPI * vari);
-        } 
-        viss[uvws_] *= complexExp((zero-I1) * two * CPI * Complex(w[uvws_]/dn, 0));
+        start_idx += current_count;
+        const float C_tmp = sumReal / current_count;
+
+        // 计算相位
+        const float phase = u_val * l[lmnC_] + v_val * m[lmnC_] + w_val * (n[lmnC_] - 1.0f);
+        // 计算复指数并累加结果
+        const Complex exp_val = complexExp((zero - I1) * two * CPI * Complex(phase, 0.0f));
+        acc += Complex(C_tmp, 0.0f) * exp_val;
     }
+
+    // 计算最终的复指数因子并存储结果
+    const Complex final_exp = complexExp((zero - I1) * two * CPI * Complex(w_val, 0.0f));
+    viss[uvws_] = acc * final_exp;
 }
 
 
 // 定义图像反演核函数  验证正确
-__global__  void imagerecon(int uvw_index, int lmnC_index, int res,
-            Complex* F, Complex *viss, float* u, float* v, float* w,
-            float* l, float* m, float* n, float* uvwFrequencyMap,
-            float *thetaP0, float *phiP0, float *dtheta, float *dphi,
-            Complex I1, Complex CPI, Complex zero, Complex two, 
-            float dl, float dm, float dn)
+__global__ void imagerecon(
+    const int uvw_index,
+    const int lmnC_index,
+    const int res,
+    Complex* __restrict__ F,                    
+    const Complex* __restrict__ viss,           
+    const float* __restrict__ u,
+    const float* __restrict__ v,
+    const float* __restrict__ w,
+    const float* __restrict__ l,
+    const float* __restrict__ m,
+    const float* __restrict__ n,
+    const float* __restrict__ uvwFrequencyMap,
+    const float* __restrict__ thetaP0,          // 添加 __restrict__
+    const float* __restrict__ phiP0,
+    const float* __restrict__ dtheta,
+    const float* __restrict__ dphi,
+    const Complex I1,                    
+    const Complex CPI,
+    const Complex zero,
+    const Complex two,
+    const float dl,
+    const float dm,
+    const float dn)
 {
-    Complex amount((float)uvw_index, 0.0);
-    
-    int lmnC_ = blockIdx.x * blockDim.x + threadIdx.x;
-    if (lmnC_ < lmnC_index){  
-        float phiP = floorf(lmnC_ / res);
-        float thetaP = lmnC_ - phiP * res;
-        Complex temp;
-        for(int uvw_=0; uvw_<uvw_index; ++uvw_)
-        {   
-            if(fabs(thetaP0[uvw_]-thetaP)<dtheta[uvw_] && fabs(phiP0[uvw_]-phiP)<dphi[uvw_]){
-                temp = zero;
-            }else{
-                Complex vari(u[uvw_]*l[lmnC_]/dl + v[uvw_]*m[lmnC_]/dm + w[uvw_]*n[lmnC_]/dn, 0.0f);
-                temp = uvwFrequencyMap[uvw_] * viss[uvw_] * complexExp(I1 * two * CPI * vari);
-            }
-            F[lmnC_] = F[lmnC_] + temp;
+    const int lmnC_ = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lmnC_ >= lmnC_index) return;
+
+    // 预计算常量
+    const Complex amount(uvw_index, 0.0f);
+    // 预计算 phiP 和 thetaP
+    const float phiP = floorf(lmnC_ / res);
+    const float thetaP = lmnC_ - phiP * res;
+
+    // 预加载当前位置的 l, m, n 值到寄存器
+    const float inv_dl = 1.0f / dl;
+    const float inv_dm = 1.0f / dm;
+    const float inv_dn = 1.0f / dn;
+    const float l_val = l[lmnC_] * inv_dl;
+    const float m_val = m[lmnC_] * inv_dm;
+    const float n_val = n[lmnC_] * inv_dn;
+
+    // 使用复数累加器
+    Complex acc = zero;
+
+    // 主循环
+    #pragma unroll 8
+    for (int uvw_ = 0; uvw_ < uvw_index; ++uvw_) {
+        // 检查条件
+        bool skip_calculation = (fabs(thetaP0[uvw_] - thetaP) < dtheta[uvw_] && fabs(phiP0[uvw_] - phiP) < dphi[uvw_]);
+
+        if (!skip_calculation) {
+            // 计算相位
+            const float phase = u[uvw_] * l_val + v[uvw_] * m_val + w[uvw_] * n_val;
+            // 计算复指数
+            const Complex exp_val = complexExp(I1 * two * CPI * Complex(phase, 0.0f));
+            // 累加结果
+            acc += uvwFrequencyMap[uvw_] * viss[uvw_] * exp_val;
         }
-        F[lmnC_] = F[lmnC_] / amount;
     }
+    // 归一化并存储结果
+    F[lmnC_] = acc / amount;
 }
 
 
 int vissGen(int id, int RES, int start_period) 
 {   
+    cout << "res: " << RES << endl;
     int days = 1;  // 一共有多少个周期  15月 * 30天 / 14天/周期
     cout << "periods: " << days << endl;
     Complex I1(0.0, 1.0);
@@ -196,8 +294,8 @@ int vissGen(int id, int RES, int start_period)
     cout << "devices: " << nDevices << endl;
 
     // 加载存储 l m n C的文件（对于不同的frequency不一样，只与frequency有关）
-    string para, address_l, address_m, address_n, address_C, address_FF;
-    ifstream lFile, mFile, nFile, cFile, FFFile;
+    string para, address_l, address_m, address_n, address_C, address_NX, address_FF;
+    ifstream lFile, mFile, nFile, cFile, NXFile, FFFile;
     para = "l";
     address_l = lmn_address + para + sufix;
     lFile.open(address_l);
@@ -240,7 +338,7 @@ int vissGen(int id, int RES, int start_period)
     cout << "NX index: " << NX_index << endl;
 
     std::vector<float> cl(lmnC_index), cm(lmnC_index), cn(lmnC_index), cc(lmnC_index);
-    std::vector<float> cFF(NX_index);
+    std::vector<float> cNX(NX_index), cFF(NX_index);
     for (int i = 0; i < lmnC_index && lFile.good() && mFile.good() && nFile.good() && cFile.good(); ++i) {
         lFile >> cl[i];
         mFile >> cm[i];
@@ -257,6 +355,33 @@ int vissGen(int id, int RES, int start_period)
     cFile.close();
     NXFile.close();
     FFFile.close();
+
+    // 加载存储 countLoc的文件
+    string address_countLoc = lmn_address + "countLoc" + sufix;
+    ifstream countLocFile(address_countLoc);
+    cout << "address_countLoc: " << address_countLoc << endl;
+    if (!countLocFile.is_open()) {
+        std::cerr << "无法打开文件: " << address_countLoc << std::endl;
+        return -1;
+    }
+    std::vector<int> cCountLoc(lmnC_index);
+    for (int i = 0; i < lmnC_index && countLocFile.good(); ++i) {
+        countLocFile >> cCountLoc[i];
+    }
+    countLocFile.close();
+    // 加载存储 NXq的文件
+    string address_NXq = lmn_address + "NXq" + sufix;
+    ifstream NXqFile(address_NXq);
+    cout << "address_NXq: " << address_NXq << endl;
+    if (!NXqFile.is_open()) {
+        std::cerr << "无法打开文件: " << address_NXq << std::endl;
+        return -1;
+    }
+    std::vector<float> cNXq(NX_index);
+    for (int i = 0; i < NX_index && NXqFile.good(); ++i) {
+        NXqFile >> cNXq[i];
+    }
+    NXqFile.close();
 
 
     // 开启cpu线程并行
@@ -280,6 +405,9 @@ int vissGen(int id, int RES, int start_period)
             // 将 n 数据限制在 -1 到 1 之间
             thrust::transform(n.begin(), n.end(), n.begin(), clip_functor());
 
+            // 将 countLoc NXq 数据从cpu搬到GPU上
+            thrust::device_vector<float> NXq = cNXq;
+            thrust::device_vector<int> countLoc = cCountLoc;
 
             thrust::device_vector<float> dNX = cNX;
             thrust::device_vector<float> dFF = cFF;
@@ -399,38 +527,70 @@ int vissGen(int id, int RES, int start_period)
             cudaEventCreate(&vissstop);
             cudaEventRecord(vissstart);
 
-            int blockSize;
+            int blockSize; // 线程块的大小
             int minGridSize; // 最小网格大小
 
-            // 先提前计算每个 q 值的索引有几个
-            thrust::device_vector<int> countLoc(lmnC_index);
-            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocCount, 0, 0);
-            int gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
-            computeLocCount<<<gridSize, blockSize>>>(
-                thrust::raw_pointer_cast(dNX.data()), 
-                thrust::raw_pointer_cast(countLoc.data()), 
-                lmnC_index, NX_index);
-            CHECK(cudaDeviceSynchronize());
-            cout << "Compute LocCount Success!" << endl;
+            // // 先提前计算每个 q 值的索引有几个
+            // cout << "LocCount Computing..." << endl;
+            // cudaEvent_t countLocstart, countLocstop;
+            // cudaEventCreate(&countLocstart);
+            // cudaEventCreate(&countLocstop);
+            // cudaEventRecord(countLocstart);
+            // thrust::device_vector<int> countLoc(lmnC_index);
+            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocCount, 0, 0);
+            // int gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            // computeLocCount<<<gridSize, blockSize>>>(
+            //     thrust::raw_pointer_cast(dNX.data()), 
+            //     thrust::raw_pointer_cast(countLoc.data()), 
+            //     lmnC_index, NX_index);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Compute LocCount Success!" << endl;
+            // // 记录countLoc结束事件
+            // cudaEventRecord(countLocstop);
+            // cudaEventSynchronize(countLocstop);
+            // // 计算经过的时间
+            // float countLocMS = 0;
+            // cudaEventElapsedTime(&countLocMS, countLocstart, countLocstop);
+            // printf("Period %d countLoc Cost Time is: %f s\n", p+1, countLocMS/1000);
+            // // 销毁事件
+            // cudaEventDestroy(countLocstart);
+            // cudaEventDestroy(countLocstop);
 
-            // 然后存下来每个 q 值对应的索引
-            thrust::device_vector<int> NXq(dNX.size());
-            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
-            gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
-            cout << "Compute LocViss, girdSize: " << gridSize << endl;
-            cout << "Compute LocViss, blockSize: " << blockSize << endl;
-            printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
-            computeLocViss<<<gridSize, blockSize>>>(
-                thrust::raw_pointer_cast(dNX.data()), 
-                thrust::raw_pointer_cast(NXq.data()), 
-                thrust::raw_pointer_cast(countLoc.data()), 
-                lmnC_index, NX_index);
-            CHECK(cudaDeviceSynchronize());
+            // // 然后存下来每个 q 值对应的索引
+            // cout << "LocViss Computing..." << endl;
+            // cudaEvent_t LocVissstart, LocVissstop;
+            // cudaEventCreate(&LocVissstart);
+            // cudaEventCreate(&LocVissstop);
+            // cudaEventRecord(LocVissstart);
+            // thrust::device_vector<int> NXq(dNX.size());
+            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
+            // gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            // cout << "Compute LocViss, girdSize: " << gridSize << endl;
+            // cout << "Compute LocViss, blockSize: " << blockSize << endl;
+            // printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
+            // computeLocViss<<<gridSize, blockSize>>>(
+            //     thrust::raw_pointer_cast(dNX.data()), 
+            //     thrust::raw_pointer_cast(NXq.data()), 
+            //     thrust::raw_pointer_cast(countLoc.data()), 
+            //     lmnC_index, NX_index);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Compute LocViss Success!" << endl;
+            // // 记录countLoc结束事件
+            // cudaEventRecord(LocVissstop);
+            // cudaEventSynchronize(LocVissstop);
+            // // 计算经过的时间
+            // float LocVissMS = 0;
+            // cudaEventElapsedTime(&LocVissMS, LocVissstart, LocVissstop);
+            // printf("Period %d LocViss Cost Time is: %f s\n", p+1, LocVissMS/1000);
+            // // 销毁事件
+            // cudaEventDestroy(LocVissstart);
+            // cudaEventDestroy(LocVissstop);
 
             // 存储计算后的可见度
+            cout << "Viss Computing..." << endl;
             thrust::device_vector<Complex> viss(uvw_index);
             cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, visscal, 0, 0);
-            gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
+            int gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
             cout << "Viss Computing, blockSize: " << blockSize << endl;
             cout << "Viss Computing, girdSize: " << gridSize << endl;
             printf("Viss Computing... Here is gpu %d running process %d on node %d\n", omp_get_thread_num(), p+1, id);
@@ -533,7 +693,7 @@ int vissGen(int id, int RES, int start_period)
                 CHECK(cudaMemcpy(host_F.data(), thrust::raw_pointer_cast(F.data()), F.size() * sizeof(Complex), cudaMemcpyDeviceToHost));
                 CHECK(cudaDeviceSynchronize());
                 // 打开文件
-                string address_F = "F_10M/F" + to_string(p+1) + "period10M.txt";
+                string address_F = "F_recon_10M/F" + to_string(p+1) + "period10M_optim1.txt";
                 cout << "Period " << p+1 << " save address_F: " << address_F << endl;
                 std::ofstream file(address_F);
                 if (file.is_open()) {

@@ -160,9 +160,6 @@ __global__ void visscal(
     const int shade_m3 = shadeM3[uvws_];
     const int shade_m4 = shadeM4[uvws_];
 
-    // 预计算常量表达式
-    const Complex phase_coef = (zero - I1) * two * CPI;
-
     // 初始化累加器
     Complex acc = zero;
     int start_idx = 0;
@@ -190,7 +187,8 @@ __global__ void visscal(
         // 计算相位和复指数
         const float phase = u_val * l[lmnC_] + v_val * m[lmnC_] + w_val * (n[lmnC_] - 1.0f);
         const Complex exp_val = complexExp((zero - I1) * two * CPI * Complex(phase, 0.0f));
-        acc += Complex(C_tmp, 0.0f) * exp_val;    }
+        acc += Complex(C_tmp, 0.0f) * exp_val;    
+    }
 
     // 计算最终结果
     const Complex final_exp = complexExp((zero - I1) * two * CPI * Complex(w_val, 0.0f));
@@ -361,7 +359,7 @@ __global__ void imagerecon(
         __syncthreads();
 
         // 处理当前块中的数据
-        #pragma unroll 4
+        #pragma unroll 8
         for (int i = 0; i < current_chunk_size; ++i) {
             // 检查条件
             bool skip_calculation = (fabs(s_thetaP0[i] - thetaP) < s_dtheta[i] && 

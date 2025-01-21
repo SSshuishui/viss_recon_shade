@@ -64,44 +64,44 @@ struct clip_functor {
 };
 
 
-// 计算特定 q 值的索引有几个
-__global__ void computeLocCount(
-    float* NX, int* countLoc, int lmnC_index, int NX_index) 
-{
-    int q = blockIdx.x * blockDim.x + threadIdx.x;
-    if (q < lmnC_index) {
-        // countLoc: (lmnC_index, 1)
-        int count = 0;
-        for (int i = 0; i < NX_index; i++) {
-            if ((NX[i]) == q) {
-                count++;
-            }
-        }
-        countLoc[q] = count;
-    }
-}
+// // 计算特定 q 值的索引有几个
+// __global__ void computeLocCount(
+//     float* NX, int* countLoc, int lmnC_index, int NX_index) 
+// {
+//     int q = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (q < lmnC_index) {
+//         // countLoc: (lmnC_index, 1)
+//         int count = 0;
+//         for (int i = 0; i < NX_index; i++) {
+//             if ((NX[i]) == q) {
+//                 count++;
+//             }
+//         }
+//         countLoc[q] = count;
+//     }
+// }
 
 
-// 把每个 q 值对应的索引保存下来
-__global__ void computeLocViss(
-    float* NX, int* NXq, int* countLoc, int lmnC_index, int NX_index) 
-{
-    int q = blockIdx.x * blockDim.x + threadIdx.x;
-    if (q < lmnC_index) {
-        // NXq: (NX_index, 1)
-        // countLoc: (lmnC_index, 1)
-        int start_idx=0;
-        for(int i=0; i<q; i++){
-            start_idx += countLoc[i];
-        }
-        for (int i = 0; i < NX_index; i++) {
-            if ((NX[i]) == q) {  // NX中的索引是从0开始的
-                NXq[start_idx] = i;
-                start_idx++;
-            }
-        }
-    }
-}
+// // 把每个 q 值对应的索引保存下来
+// __global__ void computeLocViss(
+//     float* NX, int* NXq, int* countLoc, int lmnC_index, int NX_index) 
+// {
+//     int q = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (q < lmnC_index) {
+//         // NXq: (NX_index, 1)
+//         // countLoc: (lmnC_index, 1)
+//         int start_idx=0;
+//         for(int i=0; i<q; i++){
+//             start_idx += countLoc[i];
+//         }
+//         for (int i = 0; i < NX_index; i++) {
+//             if ((NX[i]) == q) {  // NX中的索引是从0开始的
+//                 NXq[start_idx] = i;
+//                 start_idx++;
+//             }
+//         }
+//     }
+// }
 
 
 // 定义计算可见度核函数, 验证一致
@@ -111,7 +111,7 @@ __global__ void visscal(
             float* u, float* v, float* w,
             float* l, float* m, float* n,
             int* shadeM1, int* shadeM2, int* shadeM3, int* shadeM4,
-            int* NXq, int* countLoc,
+            float* NXq, int* countLoc,
             Complex I1, Complex CPI, Complex zero, Complex two, 
             float dl, float dm, float dn)
 {
@@ -124,7 +124,7 @@ __global__ void visscal(
             // 计算 C
             float sumReal = 0;
             for(int con=0; con < countLoc[lmnC_]; con++){
-                int locViss = NXq[con + start_idx];  // 从NXq中取出对应的索引, K=find(NX==q);
+                long long locViss = NXq[con + start_idx];  // 从NXq中取出对应的索引, K=find(NX==q);
                 int addFF = FF[locViss]; // 初始化为FF(K)
                 // 若 K 在遮挡区域内，则FF(K) = 240
                 for (int lo=0; lo>=shadeM3[uvws_] && lo<=shadeM4[uvws_]; ++lo){
@@ -258,6 +258,33 @@ int vissGen(int id, int RES, int start_period)
     NXFile.close();
     FFFile.close();
 
+    // 加载存储 countLoc的文件
+    string address_countLoc = lmn_address + "countLoc" + sufix;
+    ifstream countLocFile(address_countLoc);
+    cout << "address_countLoc: " << address_countLoc << endl;
+    if (!countLocFile.is_open()) {
+        std::cerr << "无法打开文件: " << address_countLoc << std::endl;
+        return -1;
+    }
+    std::vector<int> cCountLoc(lmnC_index);
+    for (int i = 0; i < lmnC_index && countLocFile.good(); ++i) {
+        countLocFile >> cCountLoc[i];
+    }
+    countLocFile.close();
+    // 加载存储 NXq的文件
+    string address_NXq = lmn_address + "NXq" + sufix;
+    ifstream NXqFile(address_NXq);
+    cout << "address_NXq: " << address_NXq << endl;
+    if (!NXqFile.is_open()) {
+        std::cerr << "无法打开文件: " << address_NXq << std::endl;
+        return -1;
+    }
+    std::vector<float> cNXq(NX_index);
+    for (int i = 0; i < NX_index && NXqFile.good(); ++i) {
+        NXqFile >> cNXq[i];
+    }
+    NXqFile.close();
+
 
     // 开启cpu线程并行
     // 一个线程处理1个GPU
@@ -279,6 +306,10 @@ int vissGen(int id, int RES, int start_period)
             thrust::device_vector<float> n(cn.begin(), cn.end());
             // 将 n 数据限制在 -1 到 1 之间
             thrust::transform(n.begin(), n.end(), n.begin(), clip_functor());
+
+            // 将 countLoc NXq 数据从cpu搬到GPU上
+            thrust::device_vector<float> NXq = cNXq;
+            thrust::device_vector<int> countLoc = cCountLoc;
 
             thrust::device_vector<float> dNX = cNX;
             thrust::device_vector<float> dFF = cFF;
@@ -401,39 +432,39 @@ int vissGen(int id, int RES, int start_period)
             int blockSize;
             int minGridSize; // 最小网格大小
 
-            // 先提前计算每个 q 值的索引有几个
-            cout << "Compute LocCount..." << endl;
-            thrust::device_vector<int> countLoc(lmnC_index);
-            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocCount, 0, 0);
-            int gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
-            computeLocCount<<<gridSize, blockSize>>>(
-                thrust::raw_pointer_cast(dNX.data()), 
-                thrust::raw_pointer_cast(countLoc.data()), 
-                lmnC_index, NX_index);
-            CHECK(cudaDeviceSynchronize());
-            cout << "Compute LocCount Success!" << endl;
+            // // 先提前计算每个 q 值的索引有几个
+            // cout << "Compute LocCount..." << endl;
+            // thrust::device_vector<int> countLoc(lmnC_index);
+            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocCount, 0, 0);
+            // int gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            // computeLocCount<<<gridSize, blockSize>>>(
+            //     thrust::raw_pointer_cast(dNX.data()), 
+            //     thrust::raw_pointer_cast(countLoc.data()), 
+            //     lmnC_index, NX_index);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Compute LocCount Success!" << endl;
 
-            // 然后存下来每个 q 值对应的索引
-            cout << "Compute LocViss..." << endl;
-            thrust::device_vector<int> NXq(dNX.size());
-            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
-            gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
-            cout << "Compute LocViss, girdSize: " << gridSize << endl;
-            cout << "Compute LocViss, blockSize: " << blockSize << endl;
-            printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
-            computeLocViss<<<gridSize, blockSize>>>(
-                thrust::raw_pointer_cast(dNX.data()), 
-                thrust::raw_pointer_cast(NXq.data()), 
-                thrust::raw_pointer_cast(countLoc.data()), 
-                lmnC_index, NX_index);
-            CHECK(cudaDeviceSynchronize());
-            cout << "Compute LocViss Success!" << endl;
+            // // 然后存下来每个 q 值对应的索引
+            // cout << "Compute LocViss..." << endl;
+            // thrust::device_vector<int> NXq(dNX.size());
+            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
+            // gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
+            // cout << "Compute LocViss, girdSize: " << gridSize << endl;
+            // cout << "Compute LocViss, blockSize: " << blockSize << endl;
+            // printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
+            // computeLocViss<<<gridSize, blockSize>>>(
+            //     thrust::raw_pointer_cast(dNX.data()), 
+            //     thrust::raw_pointer_cast(NXq.data()), 
+            //     thrust::raw_pointer_cast(countLoc.data()), 
+            //     lmnC_index, NX_index);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Compute LocViss Success!" << endl;
 
 
             // 存储计算后的可见度
             thrust::device_vector<Complex> viss(uvw_index);
             cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, visscal, 0, 0);
-            gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
+            int gridSize = floor(uvw_index + blockSize - 1) / blockSize;;  
             cout << "Viss Computing, blockSize: " << blockSize << endl;
             cout << "Viss Computing, girdSize: " << gridSize << endl;
             printf("Viss Computing... Here is gpu %d running process %d on node %d\n", omp_get_thread_num(), p+1, id);
