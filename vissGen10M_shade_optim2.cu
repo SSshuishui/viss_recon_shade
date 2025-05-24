@@ -69,101 +69,6 @@ struct clip_functor {
 };
 
 
-// __global__ void computeLocCount(
-//     const float* __restrict__ NX,
-//     int* __restrict__ countLoc,
-//     const int lmnC_index,
-//     const int NX_index)
-// {
-//     const int tid = threadIdx.x;
-//     const int q = blockIdx.x * blockDim.x + threadIdx.x;
-    
-//     // 对于4090，每个SM支持更大的共享内存
-//     extern __shared__ float shared_nx[];
-    
-//     // 仅在范围内的线程进行计算
-//     int local_count = 0;
-//     if (q < lmnC_index) {
-//         // 使用更大的CHUNK_SIZE来增加计算密度
-//         const int CHUNK_SIZE = 1024;  // 针对4090优化的块大小
-        
-//         #pragma unroll 2
-//         for (int base = 0; base < NX_index; base += CHUNK_SIZE) {
-//             const int remaining = min(CHUNK_SIZE, NX_index - base);
-            
-//             // 协作加载数据到共享内存
-//             #pragma unroll 4
-//             for (int i = tid; i < remaining; i += blockDim.x) {
-//                 shared_nx[i] = NX[base + i];
-//             }
-//             __syncwarp();  // 使用更轻量级的同步
-            
-//             // 处理当前块中的数据
-//             #pragma unroll 8  // 4090支持更深的循环展开
-//             for (int i = 0; i < remaining; i++) {
-//                 local_count += (shared_nx[i] == q);
-//             }
-//             __syncwarp();
-//         }
-        
-//         // 写回结果
-//         countLoc[q] = local_count;
-//     }
-// }
-
-
-// 把每个 q 值对应的索引保存下来
-// __global__ void computeLocViss(
-//     const float* __restrict__ NX,
-//     int* __restrict__ NXq,
-//     const int* __restrict__ countLoc,
-//     const int* __restrict__ prefixSum,  // 新增：使用前缀和数组
-//     const int lmnC_index,
-//     const int NX_index)
-// {
-//     const int tid = threadIdx.x;
-//     const int q = blockIdx.x * blockDim.x + tid;
-//     if (q >= lmnC_index) return;
-
-//     const int start_idx = prefixSum[q];
-//     int local_idx = start_idx;
-    
-//     // 声明共享内存（修复编译错误）
-//     extern __shared__ char shared_mem[];
-//     float* shared_nx = (float*)shared_mem;
-//     int* shared_indices = (int*)(shared_nx + blockDim.x);
-    
-//     const int CHUNK_SIZE = 1024;
-
-//     for (int base = 0; base < NX_index; base += CHUNK_SIZE) {
-//         const int remaining = min(CHUNK_SIZE, NX_index - base);
-        
-//         // 协作加载数据到共享内存
-//         for (int i = tid; i < remaining; i += blockDim.x) {
-//             shared_nx[i] = NX[base + i];
-//         }
-//         __syncthreads();
-        
-//         // 在共享内存中处理数据
-//         if (q < lmnC_index) {
-//             int chunk_count = 0;
-//             #pragma unroll 4
-//             for (int i = 0; i < remaining; i++) {
-//                 if (shared_nx[i] == q) {
-//                     shared_indices[chunk_count++] = base + i;
-//                 }
-//             }
-            
-//             // 将找到的索引写入全局内存
-//             for (int i = 0; i < chunk_count; i++) {
-//                 NXq[local_idx++] = shared_indices[i];
-//             }
-//         }
-//         __syncthreads();
-//     }
-// }
-
-
 // 定义计算可见度核函数, 验证一致
 __global__ void visscal(
     int uvws_index, int lmnC_index, int res,
@@ -487,7 +392,7 @@ void launch_imagerecon(
 int vissGen(int id, int RES, int start_period) 
 {   
     cout << "res: " << RES << endl;
-    int days = 1;  // 一共有多少个周期  15月 * 30天 / 14天/周期
+    int days = 34;  // 一共有多少个周期  15月 * 30天 / 14天/周期
     cout << "periods: " << days << endl;
     Complex I1(0.0, 1.0);
     float dl = 2 * RES / (RES - 1);
@@ -740,78 +645,6 @@ int vissGen(int id, int RES, int start_period)
             cudaEventRecord(vissstart);
 
             
-
-            // // 先提前计算每个 q 值的索引有几个
-            // cout << "LocCount Computing..." << endl;
-            // cudaEvent_t countLocstart, countLocstop;
-            // cudaEventCreate(&countLocstart);
-            // cudaEventCreate(&countLocstop);
-            // cudaEventRecord(countLocstart);
-            // thrust::device_vector<int> countLoc(lmnC_index);
-
-            // int blockSize = 512;  // 4090每个SM支持更多线程
-            // int gridSize = (lmnC_index + blockSize - 1) / blockSize;
-            
-            // // 针对4090优化的共享内存大小
-            // const size_t shared_mem_size_countLoc = 1024 * sizeof(float);  // 每个块使用4KB共享内存
-            
-            // computeLocCount<<<gridSize, blockSize, shared_mem_size_countLoc>>>(
-            //     thrust::raw_pointer_cast(dNX.data()), 
-            //     thrust::raw_pointer_cast(countLoc.data()), 
-            //     lmnC_index, NX_index);
-            // CHECK(cudaDeviceSynchronize());
-            // cout << "Compute LocCount Success!" << endl;
-            // // 记录countLoc结束事件
-            // cudaEventRecord(countLocstop);
-            // cudaEventSynchronize(countLocstop);
-            // // 计算经过的时间
-            // float countLocMS = 0;
-            // cudaEventElapsedTime(&countLocMS, countLocstart, countLocstop);
-            // printf("Period %d countLoc Cost Time is: %f s\n", p+1, countLocMS/1000);
-            // // 销毁事件
-            // cudaEventDestroy(countLocstart);
-            // cudaEventDestroy(countLocstop);
-
-            // // 然后存下来每个 q 值对应的索引
-            // cout << "LocViss Computing..." << endl;
-            // cudaEvent_t LocVissstart, LocVissstop;
-            // cudaEventCreate(&LocVissstart);
-            // cudaEventCreate(&LocVissstop);
-            // cudaEventRecord(LocVissstart);
-            // thrust::device_vector<int> NXq(dNX.size());
-            // thrust::device_vector<int> prefixSum(countLoc.size());
-            // thrust::exclusive_scan(
-            //     countLoc.begin(),     // 输入起始迭代器
-            //     countLoc.end(),       // 输入结束迭代器
-            //     prefixSum.begin()     // 输出起始迭代器
-            // );
-            // int minGridSize; // 最小网格大小
-            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeLocViss, 0, 0);
-            // gridSize = floor(lmnC_index + blockSize - 1) / blockSize;
-            // cout << "Compute LocViss, girdSize: " << gridSize << endl;
-            // cout << "Compute LocViss, blockSize: " << blockSize << endl;
-            // printf("Compute LocViss... Here is gpu %d running process %d\n", omp_get_thread_num(), p+1);
-            // // 计算所需的共享内存大小
-            // const size_t shared_mem_size = BLOCK_SIZE * (sizeof(float) + sizeof(int));
-            // computeLocViss<<<gridSize, blockSize, shared_mem_size>>>(
-            //     thrust::raw_pointer_cast(dNX.data()), 
-            //     thrust::raw_pointer_cast(NXq.data()), 
-            //     thrust::raw_pointer_cast(countLoc.data()), 
-            //     thrust::raw_pointer_cast(prefixSum.data()),
-            //     lmnC_index, NX_index);
-            // CHECK(cudaDeviceSynchronize());
-            // cout << "Compute LocViss Success!" << endl;
-            // // 记录countLoc结束事件
-            // cudaEventRecord(LocVissstop);
-            // cudaEventSynchronize(LocVissstop);
-            // // 计算经过的时间
-            // float LocVissMS = 0;
-            // cudaEventElapsedTime(&LocVissMS, LocVissstart, LocVissstop);
-            // printf("Period %d LocViss Cost Time is: %f s\n", p+1, LocVissMS/1000);
-            // // 销毁事件
-            // cudaEventDestroy(LocVissstart);
-            // cudaEventDestroy(LocVissstop);
-
             // 存储计算后的可见度
             cout << "Viss Computing..." << endl;
             thrust::device_vector<Complex> viss(uvw_index);
@@ -959,7 +792,7 @@ int vissGen(int id, int RES, int start_period)
 
 int main()
 {   
-    int start_period = 0;  // 从哪个周期开始，一共是130个周期
+    int start_period = 1;  // 从哪个周期开始，一共是130个周期
     vissGen(0, 20940, start_period);
 }
 

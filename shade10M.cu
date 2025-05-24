@@ -24,11 +24,10 @@ struct timeval start, finish;
 float total_time;
 
 string address = "./frequency_10M/";
-string F_address = "./F_recon_10M/";
 string para;
 string duration = "frequency10M";  // 第几个周期的uvw
 string sufix = ".txt";
-const int amount = 1;
+const int amount = 34;
 
 const int uvw_presize = 14400000;
 
@@ -132,7 +131,7 @@ int main() {
     int RES = 20940;
     
     gettimeofday(&start, NULL);
-    int nDevices = 1;
+    int nDevices;
     // 设置节点数量（gpu显卡数量）
     CHECK(cudaGetDeviceCount(&nDevices));
     // 设置并行区中的线程数
@@ -150,18 +149,18 @@ int main() {
         std::vector<Complex> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
         thrust::device_vector<Complex> u(uvw_presize), v(uvw_presize), w(uvw_presize);
 
-        for (int p = tid; p < amount; p += nDevices) 
+        for (int p = tid+1; p < amount; p += nDevices) 
         {
             // 读取uvw
-            string address_uvw = address + "uvw" + to_string(p+1) + duration + sufix;
+            string address_uvw = address + "updated_uvw" + to_string(p+1) + duration + sufix;
             cout << "address_uvw: " << address_uvw << std::endl;
 
             ifstream uvwFile(address_uvw);
             int uvw_index = 0;
-            float u_point, v_point, w_point;
+            float u_point, v_point, w_point, freq_point;
             string key_point;
             if (uvwFile.is_open()) {
-                while (uvwFile >> u_point >> v_point >> w_point) {
+                while (uvwFile >> u_point >> v_point >> w_point >> freq_point) {
                     cu[uvw_index] = Complex(u_point, 0);
                     cv[uvw_index] = Complex(v_point, 0);
                     cw[uvw_index] = Complex(w_point, 0);

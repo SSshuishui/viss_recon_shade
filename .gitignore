@@ -9,3 +9,10 @@
 *.txt
 *.csv
 *.log
+
+F_recon_1M/*.txt
+F_recon_1M_accu/
+F_recon_1M_appro/
+F_recon_10M/*.txt
+frequency_1M/*.txt
+frequency_10M/*.txt

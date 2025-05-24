@@ -442,43 +442,43 @@ void MIncline(int index, float frequency, float stride, int gpu_id) {
 
 int main()
 {
-    int periods = 130;
+    int periods = 34;
     float stride = 0.01;
     float frequency = 1e7;
 
     // auto pos_start = std::chrono::high_resolution_clock::now();
 
-    for (int index=1; index<=periods; index++){
-        MIncline(index, frequency, stride, 1); 
-    }
+    // for (int index=1; index<=periods; index++){
+    //     MIncline(index, frequency, stride, 1); 
+    // }
     
     // auto pos_end = std::chrono::high_resolution_clock::now();
     // std::chrono::duration<float, std::milli> pos_ms = pos_end - pos_start;
     // std::cout << "Position Generated in " << pos_ms.count()/1000 << "s" << std::endl;
 
-    // int nDevices;
-    // CHECK(cudaGetDeviceCount(&nDevices));
-    // int periodsPerGPU = periods / nDevices; // 每个 GPU 处理的周期数
-    // std::cout << "Num of GPU: " << nDevices << std::endl;
+    int nDevices;
+    CHECK(cudaGetDeviceCount(&nDevices));
+    int periodsPerGPU = periods / nDevices; // 每个 GPU 处理的周期数
+    std::cout << "Num of GPU: " << nDevices << std::endl;
 
-    // // 设置并行区中的线程数
-    // omp_set_num_threads(nDevices);
-    // #pragma omp parallel 
-    // {   
-    //     int tid = omp_get_thread_num();
-    //     cudaSetDevice(tid);
-    //     // 计算每个 GPU 处理的周期范围
-    //     int startPeriod = tid * periodsPerGPU+1;
-    //     int endPeriod = (tid + 1) * periodsPerGPU+1;
-    //     if (tid == nDevices - 1) {
-    //         // 确保最后一个 GPU 处理所有剩余的周期
-    //         endPeriod = periods+1;
-    //     }
-    //     // 循环遍历每个线程负责的周期
-    //     for (int index = startPeriod; index < endPeriod; index++) {
-    //         MIncline(index, frequency, stride, tid);
-    //     }
-    // }
+    // 设置并行区中的线程数
+    omp_set_num_threads(nDevices);
+    #pragma omp parallel 
+    {   
+        int tid = omp_get_thread_num();
+        cudaSetDevice(tid);
+        // 计算每个 GPU 处理的周期范围
+        int startPeriod = tid * periodsPerGPU+1;
+        int endPeriod = (tid + 1) * periodsPerGPU+1;
+        if (tid == nDevices - 1) {
+            // 确保最后一个 GPU 处理所有剩余的周期
+            endPeriod = periods+1;
+        }
+        // 循环遍历每个线程负责的周期
+        for (int index = startPeriod; index < endPeriod; index++) {
+            MIncline(index, frequency, stride, tid);
+        }
+    }
     
     return 0;
 }
